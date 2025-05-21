@@ -51,7 +51,8 @@ def get_fraudulent_accounts(evt):
       if not __validate_collaborator(provider_id):
         log(f"validation of provider didn't succeed. Stopping execution.", LogLevel.ERROR)
         return
-    
+      log("validated providers") 
+
     # step 3: mount/initialize the consumer
     consumer_id = os.environ["ID_BANKBAGG"]
     if not __initialize_consumer(consumer_id):
