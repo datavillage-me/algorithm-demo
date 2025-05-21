@@ -9,7 +9,7 @@ GET_FRAUDULENT_ACCOUNTS_QUERY = {
       "property": {"property": "reporter_bic"}
     },
     {
-      "property": {"property": "critical_account"}
+      "property": {"property": "suspected_account"}
     },
     {
       "property": {"property": "date_added"}
@@ -39,7 +39,7 @@ RESULT_COLUMNS = [
       "type": "VARCHAR"
     },
     {
-      "name": "critical_account_list",
+      "name": "suspected_account_list",
       "type": "VARCHAR"
     },
     {

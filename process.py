@@ -10,7 +10,10 @@ from dv_data_engine_client.api.default import mount_collaborator, collaborator_s
 from dv_data_engine_client.models.mount_collaborator_body import MountCollaboratorBody
 from dv_data_engine_client.models.query_collaborator_body import QueryCollaboratorBody
 from dv_data_engine_client.models.append_collaborator_body import AppendCollaboratorBody
+from dv_data_engine_client.models.start_quality_validation_response_201 import StartQualityValidationResponse201
+from dv_data_engine_client.models.finished_report import FinishedReport
 from dv_data_engine_client.types import File
+from dv_data_engine_client.api.quality import start_quality_validation, get_quality_report
 import pandas as pd
 import config
 
@@ -43,26 +46,32 @@ def get_fraudulent_accounts(evt):
         return
     log("successfully initialized providers", LogLevel.INFO)
 
-    # step 2: mount/initialize the consumer
+    for provider_id in providers_id:
+      # step 2: validate provider
+      if not __validate_collaborator(provider_id):
+        log(f"validation of provider didn't succeed. Stopping execution.", LogLevel.ERROR)
+        return
+    
+    # step 3: mount/initialize the consumer
     consumer_id = os.environ["ID_BANKBAGG"]
     if not __initialize_consumer(consumer_id):
       log("could not initialize consumer. Stopping execution.", LogLevel.ERROR)
       return
     log("successfully initialized consumer", LogLevel.INFO)
 
-    # step 3: get the fraudulent accounts from providers
+    # step 4: get the fraudulent accounts from providers
     results =  pd.DataFrame()
     for provider_id in providers_id:
       results = pd.concat([results, __query(provider_id)], axis=0, ignore_index=True)
     log("successfully loaded fraudulent accounts", LogLevel.INFO)
 
-    # step 4: process the data 
+    # step 5: process the data 
     aggregation = (
         results
         .groupby('account_number')
         .agg(
             reporter_bic_list        = ('reporter_bic', list),
-            critical_account_list = ('critical_account', list),
+            suspected_account_list = ('suspected_account', list),
             date_added_list     = ('date_added', list),
             line_count          = ('account_number', 'size')
         )
@@ -70,13 +79,19 @@ def get_fraudulent_accounts(evt):
     )
     log("successfully aggregated fraudulent accounts", LogLevel.INFO)
 
-    # step 5: append results to data consumer
+    # step 6: append results to data consumer
     if not __append_results(aggregation, consumer_id):
       log("could not append results. Stopping execution.", LogLevel.ERROR)
       return
     log("successfully appended results to consumer", LogLevel.INFO)
-
-    # step 6: export data consumer to bucket
+    
+    # step 7: validate consumer
+    if not __validate_collaborator(consumer_id):
+      log("could not validate consumer. Stopping execution.", LogLevel.ERROR)
+      return
+    log("validated consumer") 
+    
+    # step 8: export data consumer to bucket
     if not __export_results(consumer_id):
       log("could not export results. Stopping execution", LogLevel.ERROR)
       return
@@ -94,13 +109,14 @@ def __mount_provider(provider_id) -> bool:
 
 def __wait_for_status(client: Client, collab_id: str, expected_status: str) -> bool:
   status = __get_collab_status(client, collab_id)
-  while expected_status != status and config.TRIES < config.MAX_TRIES:
+  tries = 0
+  while expected_status != status and tries < config.MAX_TRIES:
     if status == "error":
       log(f"error for collaborator {collab_id}", LogLevel.ERROR)
       return False
     time.sleep(config.SLEEP_S)
     status = __get_collab_status(client, collab_id)
-    config.TRIES += 1
+    tries += 1
   
   return status == expected_status
 
@@ -143,3 +159,35 @@ def __export_results(consumer_id) -> bool:
   with create_client() as c:
     export_collaborator.sync(client=c, collaborator_id=consumer_id)
     return __wait_for_status(c, consumer_id, "exported")
+
+def __validate_collaborator(collaborator_id: str) -> bool:
+  with create_client() as c:
+    resp = start_quality_validation.sync(collaborator_id=collaborator_id, client=c)
+    if not isinstance(resp, StartQualityValidationResponse201):
+      log(f"could not start quality validation. Got {resp}", LogLevel.ERROR)
+      return False
+    report_id = resp.to_dict()["id"]
+    return __check_quality_report(c, report_id)
+
+def __check_quality_report(client: Client, report_id: str) -> bool:
+  report = __get_finished_report(client, report_id)
+  if report is None:
+    log("could not get quality report", LogLevel.ERROR)
+    return False
+  log(report)
+  fail = report["fail"]
+  error = report["error"]
+  
+  return len(fail) == 0 and len(error) == 0
+
+def __get_finished_report(client: Client, report_id: str) -> object:
+  max_tries = 10
+  tries = 0
+  sleep_s = 1
+  while tries < max_tries:
+    time.sleep(sleep_s)
+    tries += 1
+    resp = get_quality_report.sync(report_id=report_id, client=client)
+    if isinstance(resp, FinishedReport):
+      return resp.to_dict()
+  return None
